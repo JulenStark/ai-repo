@@ -1,0 +1,16 @@
+{
+  "compatibility_date": "2024-11-01",
+  "main": "src/index.ts",
+  "name": "chat-ai-assistant",
+  "upload_source_maps": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_id": "65e47f78-f950-412f-b01f-328a6260aa51",
+      "database_name": "chat-assist-db"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
