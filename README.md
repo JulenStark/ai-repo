@@ -1,57 +1,72 @@
-# Worker + D1 Database
+export default {
+    async fetch(request, env) {
+        const { method } = request;
+        
+        if (method === "POST") {
+            try {
+                const { userId, message } = await request.json();
+                const OPENAI_API_KEY = env.OPENAI_API_KEY;
+                const ASSISTANT_ID = env.ASSISTANT_ID;
 
-![Worker + D1 Template Preview](https://imagedelivery.net/wSMYJvS3Xw-n339CbDyDIA/cb7cb0a9-6102-4822-633c-b76b7bb25900/public)
+                // 🔍 Buscar thread en D1 Database
+                let threadResult = await env.DB_CHAT.prepare("SELECT id FROM threads WHERE user_id = ?")
+                    .bind(userId)
+                    .first();
 
-<!-- dash-content-start -->
+                let threadId = threadResult ? threadResult.id : null;
 
-D1 is Cloudflare's native serverless SQL database ([docs](https://developers.cloudflare.com/d1/)). This project demonstrates using a Worker with a D1 binding to execute a SQL statement. A simple frontend displays the result of this query:
+                if (!threadId) {
+                    // 🆕 Si no hay un thread, se crea uno nuevo en OpenAI
+                    const threadResponse = await fetch("https://api.openai.com/v1/threads", {
+                        method: "POST",
+                        headers: { 
+                            "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({ assistant_id: ASSISTANT_ID })
+                    });
 
-```SQL
-SELECT * FROM comments LIMIT 3;
-```
+                    const threadData = await threadResponse.json();
+                    threadId = threadData.id;
 
-The D1 database is initialized with a `comments` table and this data:
+                    // 📌 Guardar el nuevo thread en D1 Database
+                    await env.DB_CHAT.prepare("INSERT INTO threads (id, user_id, messages) VALUES (?, ?, ?)")
+                        .bind(threadId, userId, "[]")
+                        .run();
+                }
 
-```SQL
-INSERT INTO comments (author, content)
-VALUES
-    ('Kristian', 'Congrats!'),
-    ('Serena', 'Great job!'),
-    ('Max', 'Keep up the good work!')
-;
-```
+                // 📩 Enviar mensaje al asistente en OpenAI
+                const response = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
+                    method: "POST",
+                    headers: { 
+                        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({ role: "user", content: message })
+                });
 
-> [!IMPORTANT]
-> When using C3 to create this project, select "no" when it asks if you want to deploy. You need to follow this project's [setup steps](https://github.com/cloudflare/templates/tree/main/chat-ai-assistant#setup-steps) before deploying.
+                const responseData = await response.json();
 
-<!-- dash-content-end -->
+                // 📌 Guardar la conversación en la base de datos
+                let messagesData = JSON.stringify([{ role: "user", content: message }]);
+                await env.DB_CHAT.prepare("UPDATE threads SET messages = ? WHERE id = ?")
+                    .bind(messagesData, threadId)
+                    .run();
 
-## Getting Started
+                // 📩 Responder con el mensaje del asistente
+                return new Response(JSON.stringify({ reply: responseData.choices[0].message.content }), {
+                    headers: { "Content-Type": "application/json" }
+                });
 
-Outside of this repo, you can start a new project with this template using [C3](https://developers.cloudflare.com/pages/get-started/c3/) (the `create-cloudflare` CLI):
-
-```
-npm create cloudflare@latest -- --template=cloudflare/templates/chat-ai-assistant
-```
-
-A live public deployment of this template is available at [https://chat-ai-assistant.templates.workers.dev](https://chat-ai-assistant.templates.workers.dev)
-
-## Setup Steps
-
-1. Install the project dependencies with a package manager of your choice:
-   ```bash
-   npm install
-   ```
-2. Create a [D1 database](https://developers.cloudflare.com/d1/get-started/) with the name "chat-assist-db":
-   ```bash
-   npx wrangler d1 create chat-assist-db
-   ```
-   ...and update the `database_id` field in `wrangler.json` with the new database ID.
-3. Run the following db migration to initialize the database (notice the `migrations` directory in this project):
-   ```bash
-   npx wrangler d1 migrations apply --remote chat-assist-db
-   ```
-4. Deploy the project!
-   ```bash
-   npx wrangler deploy
-   ```
+            } catch (error) {
+                return new Response(JSON.stringify({ error: error.message }), {
+                    status: 500,
+                    headers: { "Content-Type": "application/json" }
+                });
+            }
+        }
+        
+        // ⛔ Si no es un POST, devolver error
+        return new Response("Método no permitido", { status: 405 });
+    }
+};
