@@ -1,34 +1,36 @@
 export default {
     async fetch(request: Request, env: any): Promise<Response> {
-        const allowedOrigins = ["https://algimnasio.com"]; // 🔒 Solo permite solicitudes desde este dominio
-        const origin = request.headers.get("Origin");
+        try {
+            const allowedOrigins = ["https://algimnasio.com"];
+            const origin = request.headers.get("Origin");
 
-        if (!origin || !allowedOrigins.includes(origin)) {
-            return new Response("❌ Acceso no autorizado", {
-                status: 403,
-                headers: { "Access-Control-Allow-Origin": "https://algimnasio.com" }
-            });
-        }
+            if (!origin || !allowedOrigins.includes(origin)) {
+                return new Response("❌ Acceso no autorizado", { status: 403 });
+            }
 
-        const { method } = request;
+            const { method } = request;
 
-        if (method === "OPTIONS") {
-            return new Response(null, {
-                headers: {
-                    "Access-Control-Allow-Origin": origin,
-                    "Access-Control-Allow-Methods": "POST, OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type"
-                }
-            });
-        }
+            if (method === "OPTIONS") {
+                return new Response(null, {
+                    headers: {
+                        "Access-Control-Allow-Origin": origin,
+                        "Access-Control-Allow-Methods": "POST, OPTIONS",
+                        "Access-Control-Allow-Headers": "Content-Type"
+                    }
+                });
+            }
 
-        if (method === "POST") {
-            try {
+            if (method === "POST") {
                 const { userId, message } = await request.json();
+                if (!userId || !message) throw new Error("Faltan parámetros en la solicitud.");
+
                 const OPENAI_API_KEY = env.OPENAI_API_KEY;
                 const ASSISTANT_ID = env.ASSISTANT_ID;
 
-                // 🔍 Buscar thread en D1 Database
+                if (!OPENAI_API_KEY || !ASSISTANT_ID) {
+                    throw new Error("❌ ERROR: Las variables de entorno no están configuradas.");
+                }
+
                 let threadResult = await env.DB_CHAT.prepare("SELECT id FROM threads WHERE user_id = ?")
                     .bind(userId)
                     .first();
@@ -36,7 +38,6 @@ export default {
                 let threadId = threadResult ? threadResult.id : null;
 
                 if (!threadId) {
-                    // 🆕 Crear un nuevo thread en OpenAI si no existe
                     const threadResponse = await fetch("https://api.openai.com/v1/threads", {
                         method: "POST",
                         headers: { 
@@ -46,16 +47,19 @@ export default {
                         body: JSON.stringify({ assistant_id: ASSISTANT_ID })
                     });
 
+                    if (!threadResponse.ok) {
+                        const errorMsg = await threadResponse.text();
+                        throw new Error(`Error al crear el thread en OpenAI: ${errorMsg}`);
+                    }
+
                     const threadData = await threadResponse.json();
                     threadId = threadData.id;
 
-                    // 📌 Guardar el nuevo thread en D1 Database
                     await env.DB_CHAT.prepare("INSERT INTO threads (id, user_id, messages) VALUES (?, ?, ?)")
                         .bind(threadId, userId, "[]")
                         .run();
                 }
 
-                // 📩 Enviar mensaje al asistente en OpenAI
                 const response = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
                     method: "POST",
                     headers: { 
@@ -65,37 +69,27 @@ export default {
                     body: JSON.stringify({ role: "user", content: message })
                 });
 
-                const responseData = await response.json();
+                if (!response.ok) {
+                    const errorMsg = await response.text();
+                    throw new Error(`Error en la respuesta de OpenAI: ${errorMsg}`);
+                }
 
-                // 📌 Guardar la conversación en la base de datos
+                const responseData = await response.json();
                 let messagesData = JSON.stringify([{ role: "user", content: message }]);
+
                 await env.DB_CHAT.prepare("UPDATE threads SET messages = ? WHERE id = ?")
                     .bind(messagesData, threadId)
                     .run();
 
-                // 📩 Responder con el mensaje del asistente
                 return new Response(JSON.stringify({ reply: responseData.choices[0].message.content }), {
-                    headers: { 
-                        "Content-Type": "application/json",
-                        "Access-Control-Allow-Origin": origin
-                    }
-                });
-
-            } catch (error: any) {
-                return new Response(JSON.stringify({ error: error.message }), {
-                    status: 500,
-                    headers: { 
-                        "Content-Type": "application/json",
-                        "Access-Control-Allow-Origin": "https://algimnasio.com"
-                    }
+                    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": origin }
                 });
             }
+
+            return new Response("❌ Método no permitido", { status: 405 });
+
+        } catch (error: any) {
+            return new Response(`❌ Error interno: ${error.message}`, { status: 500 });
         }
-        
-        // ⛔ Si no es un POST, devolver error
-        return new Response("❌ Método no permitido", { 
-            status: 405,
-            headers: { "Access-Control-Allow-Origin": "https://algimnasio.com" }
-        });
     }
 };
