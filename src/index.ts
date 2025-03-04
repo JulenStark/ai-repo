@@ -1,74 +1,85 @@
+// 📌 Código para el Worker en Cloudflare (`index.ts`)
+// ✅ Maneja la comunicación con OpenAI y devuelve respuestas al chat
+
 export default {
     async fetch(request: Request, env: any): Promise<Response> {
         try {
-            const origin = request.headers.get("Origin") || "*"; // Permite cualquier dominio
-
-            // Manejo de CORS
-            if (request.method === "OPTIONS") {
-                return new Response(null, {
-                    headers: {
-                        "Access-Control-Allow-Origin": "*",
-                        "Access-Control-Allow-Methods": "POST, OPTIONS",
-                        "Access-Control-Allow-Headers": "Content-Type"
-                    }
-                });
-            }
-
+            // 🔹 Asegurar que la solicitud es POST
             if (request.method !== "POST") {
-                throw new Error("Método no permitido. Solo se aceptan solicitudes POST.");
+                return new Response("❌ Método no permitido", { status: 405 });
             }
 
-            let userId;
-            try {
-                const body = await request.json();
-                userId = body.userId;
-                if (!userId) throw new Error("Falta el parámetro 'userId'.");
-            } catch (error) {
-                throw new Error(`Error en el JSON de la solicitud: ${error.message}`);
+            // 🔹 Obtener datos de la solicitud
+            const { userId, message } = await request.json();
+            if (!userId || !message) {
+                throw new Error("Faltan parámetros en la solicitud.");
             }
 
-            let messageCount;
-            try {
-                // Buscar cuántos mensajes ha enviado el usuario
-                let result = await env.DB_CHAT.prepare("SELECT count FROM message_count WHERE user_id = ?")
-                    .bind(userId)
-                    .first();
+            // 🔹 Configurar credenciales de OpenAI (Definidas en Cloudflare)
+            const OPENAI_API_KEY = env.OPENAI_API_KEY; // 🔄 Cambiar en Cloudflare si es necesario
+            const ASSISTANT_ID = env.ASSISTANT_ID; // 🔄 Cambiar en Cloudflare si es necesario
 
-                messageCount = result ? result.count : 0;
-                messageCount++; // Incrementamos el contador
+            if (!OPENAI_API_KEY || !ASSISTANT_ID) {
+                throw new Error("❌ ERROR: Las variables de entorno OPENAI_API_KEY o ASSISTANT_ID no están configuradas.");
+            }
 
-                if (result) {
-                    // Si el usuario ya tenía un conteo, lo actualizamos
-                    await env.DB_CHAT.prepare("UPDATE message_count SET count = ? WHERE user_id = ?")
-                        .bind(messageCount, userId)
-                        .run();
-                } else {
-                    // Si es la primera vez que el usuario envía un mensaje, lo insertamos en la DB
-                    await env.DB_CHAT.prepare("INSERT INTO message_count (user_id, count) VALUES (?, ?)")
-                        .bind(userId, messageCount)
-                        .run();
+            // 🔹 Crear un nuevo Thread en OpenAI (SIN historial)
+            const threadResponse = await fetch("https://api.openai.com/v1/threads", {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                    "Content-Type": "application/json"
                 }
-            } catch (error) {
-                throw new Error(`Error al acceder a la base de datos: ${error.message}`);
+            });
+
+            if (!threadResponse.ok) {
+                const errorMsg = await threadResponse.text();
+                throw new Error(`Error al crear thread en OpenAI: ${errorMsg}`);
             }
 
-            return new Response(JSON.stringify({ reply: `hola ${messageCount}` }), {
+            const threadData = await threadResponse.json();
+            const threadId = threadData.id;
+
+            // 🔹 Enviar el mensaje al Thread recién creado
+            await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ role: "user", content: message })
+            });
+
+            // 🔹 Ejecutar el asistente para obtener la respuesta
+            await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${OPENAI_API_KEY}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ assistant_id: ASSISTANT_ID })
+            });
+
+            // 🔹 Obtener la respuesta de OpenAI
+            const response = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
+                headers: { "Authorization": `Bearer ${OPENAI_API_KEY}` }
+            });
+            
+            const data = await response.json();
+            const reply = data.data[data.data.length - 1].content;
+
+            // 🔹 Enviar respuesta de vuelta al frontend (WordPress)
+            return new Response(JSON.stringify({ reply }), {
                 headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
             });
 
         } catch (error: any) {
+            // 🔹 Capturar cualquier error y devolver un mensaje claro
             return new Response(
-                JSON.stringify({
-                    error: "❌ Error interno en el Worker",
-                    message: error.message,
-                    stack: error.stack
-                }), 
+                JSON.stringify({ error: "❌ Error interno en el Worker", message: error.message }),
                 {
                     status: 500,
-                    headers: { 
-                        "Content-Type": "application/json",
-                        "Access-Control-Allow-Origin": "*"
-                    }
+                    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
                 }
             );
         }
